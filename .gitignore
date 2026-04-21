@@ -1,2 +1,14 @@
 plan/
 .vscode/
+
+# MistyLemur app build artifacts
+ios/.build/
+ios/.swiftpm/
+ios/DerivedData/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+server/node_modules/
+server/dist/
+worker/node_modules/
+worker/dist/
+.env
+.env.local
