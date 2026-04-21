@@ -16,6 +16,7 @@ The novel part of the system is not "video messaging" (well-solved) but **motion
 - **Hosting:** Supabase (Postgres + Auth + Storage + Realtime) for the data plane, Fastify (TypeScript) service on Fly.io for domain routes, second Fly.io container as the BullMQ + FFmpeg compilation worker. Redis via Upstash.
 - **Match strictness:** game-feel strict — threshold set so ~70% of honest attempts succeed within 3 tries. Live score surfaced to the receiver so every retry feels like "getting warmer."
 - **Clip length:** **dictated by the originator**. The first clip in a thread (for 1:1) or in a group round sets `required_duration_ms`; every matching response must record for exactly that duration. The UI enforces this with a countdown bar on the receiver side.
+- **Zoom:** the originator's camera zoom curve is captured at 100 Hz alongside the IMU and **auto-replayed** on the receiver's device during their attempt via `AVCaptureDevice.rampToVideoZoomFactor(_:withRate:)`. Zoom is not part of the DTW cost — it's a cinematography track that preserves the sender's framing intent without adding matching friction. For MVP, clamp both sender and receiver to the wide lens only (1×–5× digital zoom) to avoid the lens-switch jump at 3×.
 
 ## Recommended Architecture
 
@@ -27,6 +28,12 @@ The novel part of the system is not "video messaging" (well-solved) but **motion
 - Compare with **FastDTW** (radius 10) on the 6-D series, Euclidean local cost, gyro axes weighted 1.5× (rotation is more distinctive than translation).
 - Threshold: calibrate empirically — collect ~50 self-match and ~50 cross-motion pairs, set threshold at the 90th percentile of self-match distances. Tuned for ~70% pass-in-3-attempts (game-feel strict).
 - Run **on-device** on the receiver's phone for instant "getting warmer" feedback. The server re-runs the same comparison (TS port) as anti-cheat before unlocking the mutual exchange.
+
+**Zoom auto-replay (cinematography track):**
+- Sender's `AVCaptureDevice.videoZoomFactor` is polled at 100 Hz during capture and stored as `zoom` in the signature JSON: an array of `{t_ms, factor}` points.
+- On the receiver side, a `ZoomDriver` reads the sender's curve and issues `rampToVideoZoomFactor(_:withRate:)` calls scheduled against the recording's t=0. Zoom is linearly interpolated between sample points; rate is set so the ramp completes before the next point.
+- Receiver's actually-reached zoom is logged into `motion_attempts.zoom_deviation` (RMS error vs the target curve). If it exceeds a tolerance (e.g., 0.3× RMS), the attempt is marked invalid — this catches cases where the user covered the camera or the app lost focus during capture.
+- Wide-lens-only clamp for MVP: `videoZoomFactor` constrained to [1.0, 5.0] to avoid the 0.5× / 3× lens-switch frame jump.
 
 ## Data Model (Postgres)
 
@@ -40,15 +47,16 @@ messages(id, chat_id, sender_id, video_url, signature_url,
 message_recipients(message_id, recipient_id, state ENUM('locked','unlocked','responded'),
                    attempt_count, unlocked_at, response_video_url)
 group_completions(message_id, required_count, completed_count, compilation_url, state)
-motion_attempts(id, message_id, user_id, dtw_score, recorded_duration_ms, passed, created_at)
+motion_attempts(id, message_id, user_id, dtw_score, zoom_deviation,
+                recorded_duration_ms, passed, created_at)
 ```
 
 `required_duration_ms` is the single source of truth for clip length in a thread. The client rejects any recording attempt whose duration deviates by more than ±150 ms; the server rejects the same at upload time (defense in depth).
 
 ## Core Flows
 
-- **Record & send (originator):** open camera → start `AVCaptureSession` + `CMMotionManager` together → record for whatever duration feels right, tap to stop → the recorded duration becomes `required_duration_ms` for the thread → upload `video.mp4` + `signature.json` → create `messages` row and fan out `message_recipients`.
-- **Receive & unlock:** tap push → fetch locked video (blurred preview) + sender's signature + `required_duration_ms` → UI shows a countdown bar for exactly that duration → press-and-hold to record; recording auto-stops when the bar fills → on stop, run on-device FastDTW → if `score < threshold`: upload response video, server re-verifies, mark `unlocked+responded`, stream sender's clip to receiver and deliver receiver's response to sender. Else: show score, "try again."
+- **Record & send (originator):** open camera → start `AVCaptureSession` + `CMMotionManager` together, sampling IMU and `videoZoomFactor` at 100 Hz → user may pinch-zoom freely (clamped to 1×–5×) → tap to stop → the recorded duration becomes `required_duration_ms` for the thread → upload `video.mp4` + `signature.json` (IMU + zoom curve) → create `messages` row and fan out `message_recipients`.
+- **Receive & unlock:** tap push → fetch locked video (blurred preview) + sender's signature + `required_duration_ms` → UI shows a countdown bar for exactly that duration → press-and-hold to record; the phone **auto-zooms along the sender's curve** while the user handles pan/tilt/motion → recording auto-stops when the bar fills → on stop, run on-device FastDTW on IMU + verify `zoom_deviation` under tolerance → if both pass: upload response video, server re-verifies, mark `unlocked+responded`, stream sender's clip to receiver and deliver receiver's response to sender. Else: show score, "try again."
 - **Group compilation (>5 members):** every matched recipient increments `group_completions.completed_count`. When it equals `required_count`, enqueue a BullMQ `compile` job. The worker downloads all N clips — all guaranteed identical duration because of `required_duration_ms` — concatenates with FFmpeg (stream-copy concat, no re-encode needed since codecs/timing are uniform), uploads `compilation.mp4`, updates the row, and pushes to every member.
 
 ## Critical Files to Create
@@ -58,7 +66,9 @@ motion_attempts(id, message_id, user_id, dtw_score, recorded_duration_ms, passed
   App.swift                                 # SwiftUI entry, auth gate
   Capture/CaptureSession.swift              # synchronized AVCaptureSession + CMMotionManager
   Capture/MotionRecorder.swift              # 100 Hz deviceMotion sampler → [Sample]
-  Motion/Signature.swift                    # resample + z-score + low-pass; JSON codec
+  Capture/ZoomCurve.swift                   # sampled videoZoomFactor timeline; interpolation
+  Capture/ZoomDriver.swift                  # drives receiver's zoom from sender's curve
+  Motion/Signature.swift                    # resample + z-score + low-pass; JSON codec (IMU + zoom)
   Motion/FastDTW.swift                      # 6-D FastDTW with gyro weighting
   Motion/Matcher.swift                      # orchestrates preprocess + DTW + threshold
   Features/Compose/ComposeView.swift        # record-and-send screen
@@ -99,7 +109,8 @@ A build is working when:
 2. **Duration enforcement** — a response recorded for `required_duration_ms ± 150 ms` is accepted; one outside that window is rejected by both the client and the server (`POST /messages/:id/attempt` returns 422).
 3. **Self-match** — record the same gesture twice on one device. DTW score must land well below the threshold. Repeat ~20× across different gestures (pan, tilt, walk, arc, shake). Self-match pass rate should be ≥ 70% within 3 attempts.
 4. **Cross-motion reject** — record a pan then attempt a shake. Score must land well above the threshold; message stays locked.
-5. **End-to-end 1:1** — sender A records a 4 s clip, receiver B opens the message (blurred), B's UI shows a 4 s countdown bar, B matches, B sees A's clip, A receives B's response clip.
+5. **End-to-end 1:1** — sender A records a 4 s clip while zooming from 1× to 4× at t=2s. Receiver B opens the message (blurred), B's UI shows a 4 s countdown bar, B's phone auto-zooms to 4× at t=2s while B pans/tilts to match the motion, B matches, B sees A's clip, A receives B's response clip.
+5a. **Zoom replay fidelity** — log the receiver's actually-reached `videoZoomFactor` every 50 ms during an attempt; RMS deviation from the sender's curve must stay under 0.3×. If the user covers the camera or backgrounds the app mid-recording, `zoom_deviation` spikes and the attempt is marked invalid.
 6. **Group compilation (Phase 2)** — create a 6-person group, originator records a 3 s clip, the other 5 each match in under 3 tries. A `compilation.mp4` of length ≈ 18 s (6 × 3 s) appears in every inbox and plays end-to-end without gaps.
 7. **Anti-cheat (Phase 2)** — POST a forged "passed" attempt with a mismatched signature; server re-runs FastDTW and rejects with 422; message stays locked.
 
