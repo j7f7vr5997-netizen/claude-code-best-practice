@@ -171,7 +171,7 @@ extension CaptureSession: AVCaptureFileOutputRecordingDelegate {
 private extension DispatchQueue {
     func performAsync<T>(_ block: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { cont in
-            async {
+            self.async {
                 do { cont.resume(returning: try block()) }
                 catch { cont.resume(throwing: error) }
             }
