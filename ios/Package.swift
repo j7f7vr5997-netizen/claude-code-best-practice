@@ -26,6 +26,7 @@ let package = Package(
                 "Motion/FastDTW.swift",
                 "Motion/Signature.swift",
                 "Motion/Matcher.swift",
+                "Motion/MotionPath.swift",
                 "Capture/ZoomCurve.swift",
             ]
         ),
