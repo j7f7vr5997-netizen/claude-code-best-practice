@@ -38,4 +38,21 @@ final class FastDTWTests: XCTestCase {
         XCTAssertEqual(c.points[1].f, ZoomCurve.maxFactor)
         XCTAssertEqual(c.points[2].f, ZoomCurve.minFactor)
     }
+
+    func testMotionPathProducesNormalizedPoints() {
+        // Pure yaw motion: gy is sinusoidal, gx zero. Path should sweep
+        // horizontally with all y values clustered near the middle.
+        let samples = (0..<200).map {
+            MotionSample(ax: 0, ay: 0, az: 0, gx: 0, gy: sin(Double($0) * 0.05), gz: 0)
+        }
+        let sig = Signature(durationMs: 2000, sampleRateHz: 100, samples: samples, zoom: ZoomCurve())
+        let trace = MotionPath.project(signature: sig, targetPoints: 32)
+        XCTAssertEqual(trace.count, 32)
+        // All points must land inside the unit box.
+        XCTAssertTrue(trace.allSatisfy { $0.x >= 0 && $0.x <= 1 && $0.y >= 0 && $0.y <= 1 })
+        // For pure yaw motion, x should span more than y.
+        let xRange = (trace.map(\.x).max()! - trace.map(\.x).min()!)
+        let yRange = (trace.map(\.y).max()! - trace.map(\.y).min()!)
+        XCTAssertGreaterThan(xRange, yRange)
+    }
 }
