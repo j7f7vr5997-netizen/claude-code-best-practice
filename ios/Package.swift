@@ -14,6 +14,14 @@ let package = Package(
         .target(
             name: "MistyLemurMotion",
             path: "MistyLemur",
+            exclude: [
+                "App.swift",
+                "Capture/CaptureSession.swift",
+                "Capture/MotionRecorder.swift",
+                "Capture/ZoomDriver.swift",
+                "Features",
+                "Net",
+            ],
             sources: [
                 "Motion/FastDTW.swift",
                 "Motion/Signature.swift",
