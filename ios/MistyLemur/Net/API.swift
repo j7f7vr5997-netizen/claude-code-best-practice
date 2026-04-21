@@ -28,10 +28,19 @@ public final class API {
 
     // MARK: - Messages
 
-    public func sendMessage(videoURL: URL, signature: Signature) async throws {
+    public func sendMessage(
+        videoURL: URL,
+        signature: Signature,
+        tracePreview: [TracePoint],
+        soundtrackId: String? = nil
+    ) async throws {
         // 1. Upload video.mp4 + signature.json via Storage helper.
-        // 2. POST /messages with the resulting URLs + signature.durationMs.
+        // 2. POST /messages with the resulting URLs + signature.durationMs +
+        //    tracePreview (for the inbox thumbnail) + soundtrackId (group
+        //    compilations overlay this track instead of stream-copy concat).
     }
+
+    public func fetchSoundtracks() async throws -> [SoundtrackSummary] { [] }
 
     public func fetchInbox() async throws -> [InboxMessage] { [] }
     public func fetchSignature(messageId: String) async throws -> Signature {
@@ -56,4 +65,13 @@ public extension API.Env {
         supabaseURL: URL(string: "https://example.supabase.co")!,
         supabaseAnonKey: ""
     )
+}
+
+public struct SoundtrackSummary: Identifiable, Sendable {
+    public let id: String
+    public let title: String
+    public let artist: String
+    public let durationMs: Int
+    public let isTrending: Bool
+    public let playCount: Int
 }
