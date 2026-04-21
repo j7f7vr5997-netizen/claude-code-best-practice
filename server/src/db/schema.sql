@@ -68,11 +68,15 @@ create table group_completions (
 -- Per-attempt telemetry. This table is the primary tool for tuning the
 -- DTW threshold: plot dtw_score where passed=true vs passed=false and
 -- pick the threshold where distributions cleanly separate.
+-- zoom_deviation is the RMS error between the sender's zoom curve and
+-- the receiver's actually-reached videoZoomFactor during the attempt.
+-- A high value indicates the camera was covered or the app was backgrounded.
 create table motion_attempts (
   id                    uuid primary key default gen_random_uuid(),
   message_id            uuid not null references messages(id) on delete cascade,
   user_id               uuid not null references users(id) on delete cascade,
   dtw_score             double precision not null,
+  zoom_deviation        double precision not null default 0,
   recorded_duration_ms  integer not null,
   passed                boolean not null,
   created_at            timestamptz not null default now()
