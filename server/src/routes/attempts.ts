@@ -33,16 +33,36 @@ const AttemptBody = z.object({
 const DTW_THRESHOLD = 6.0;
 const ZOOM_DEVIATION_TOLERANCE = 0.3;
 const DURATION_TOLERANCE_MS = 150;
+/// Snapchat-style replay cap. After 5 failed attempts the message is locked
+/// permanently and the sender is notified ("X ran out of attempts").
+const MAX_ATTEMPTS = 5;
+/// BeReal-style "late" badge: response landed within the last 10% of the
+/// group expiration window.
+const LATE_RESPONSE_FRACTION = 0.1;
 
 export async function registerAttemptRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>("/messages/:id/attempt", async (req, reply) => {
     const body = AttemptBody.parse(req.body);
     const messageId = req.params.id;
 
+    // 0. Load recipient row to enforce the replay cap up front — no point
+    //    burning CPU on FastDTW if the user is already exhausted.
+    const recipient = {                     // stub: SELECT FROM message_recipients ...
+      state: "locked" as "locked" | "unlocked" | "responded" | "exhausted",
+      attempt_count: 0,
+    };
+    if (recipient.state === "exhausted" || recipient.attempt_count >= MAX_ATTEMPTS) {
+      return reply.code(410).send({ error: "out_of_attempts" });
+    }
+    if (recipient.state !== "locked") {
+      return reply.code(409).send({ error: "already_unlocked" });
+    }
+
     // 1. Load message.required_duration_ms + sender signature from storage.
-    const requiredMs = 4000;                // stub: SELECT from messages
-    const senderSamples: MotionSample[] = []; // stub: GET signature.json from Storage
-    const senderZoom: { t: number; f: number }[] = [];  // stub
+    const requiredMs = 4000;
+    const senderSamples: MotionSample[] = [];
+    const senderZoom: { t: number; f: number }[] = [];
+    const groupExpiresAt: Date | null = null;          // stub: SELECT FROM group_completions
 
     // 2. Duration gate.
     if (Math.abs(body.recordedDurationMs - requiredMs) > DURATION_TOLERANCE_MS) {
@@ -52,18 +72,51 @@ export async function registerAttemptRoutes(app: FastifyInstance) {
     // 3. DTW (re-run, don't trust client score).
     const dtwScore = fastDTWDistance(senderSamples, body.receiverSignature.samples);
 
-    // 4. Zoom deviation — RMS between sender's curve and receiver's actual.
+    // 4. Zoom deviation.
     const zoomDeviation = rmsZoomDeviation(senderZoom, body.zoomActual);
 
     const passed = dtwScore < DTW_THRESHOLD && zoomDeviation < ZOOM_DEVIATION_TOLERANCE;
 
     // 5. Insert motion_attempts telemetry regardless of pass/fail.
-    // 6. On pass: update message_recipients.state='unlocked', set response_video_url,
-    //    increment group_completions.completed_count if applicable, push to sender,
-    //    enqueue compile job if completed_count == required_count.
+    // 6. UPDATE message_recipients SET attempt_count = attempt_count + 1.
+    const newAttemptCount = recipient.attempt_count + 1;
+    const reachedCap = !passed && newAttemptCount >= MAX_ATTEMPTS;
 
-    return reply.send({ passed, dtwScore, zoomDeviation });
+    if (passed) {
+      // 7a. Mark unlocked + responded. Compute is_late_response if this is a group.
+      const isLate = isLateResponse(groupExpiresAt);
+      // UPDATE message_recipients SET state='unlocked', unlocked_at=now(),
+      //   response_video_url=body.responseVideoKey, is_late_response=isLate;
+      // INCREMENT group_completions.completed_count atomically;
+      //   if completed_count == required_count: enqueue compile job + state='compiling';
+      //   (the deadline job will noop when it sees state != 'pending').
+      // Push APNs to sender: "Matched! by @recipient_handle".
+      return reply.send({ passed, dtwScore, zoomDeviation, isLate, attemptsRemaining: MAX_ATTEMPTS });
+    }
+
+    if (reachedCap) {
+      // 7b. UPDATE message_recipients SET state='exhausted'.
+      // Push APNs to sender: "@recipient_handle ran out of attempts".
+      return reply.send({
+        passed: false, dtwScore, zoomDeviation, attemptsRemaining: 0, exhausted: true,
+      });
+    }
+
+    return reply.send({
+      passed: false, dtwScore, zoomDeviation,
+      attemptsRemaining: MAX_ATTEMPTS - newAttemptCount,
+    });
   });
+}
+
+function isLateResponse(groupExpiresAt: Date | null): boolean {
+  if (!groupExpiresAt) return false;
+  // True if we're within the last 10% of the round window. We don't have the
+  // round duration here, so approximate: late iff time-to-expiration < expirationWindow * 0.1.
+  // In production: compare against (expires_at - created_at) * LATE_RESPONSE_FRACTION.
+  const msToExpiry = groupExpiresAt.getTime() - Date.now();
+  const assumedWindowMs = 24 * 3600 * 1000;
+  return msToExpiry < assumedWindowMs * LATE_RESPONSE_FRACTION;
 }
 
 function rmsZoomDeviation(
