@@ -53,8 +53,12 @@ final class CaptureCoordinator: ObservableObject {
             task = Task { await tickTimer() }
             do {
                 let result = try await capture.startRecording(mode: .compose, duration: 15)
+                let trace = MotionPath.project(signature: result.signature)
                 try await session.api.sendMessage(
-                    videoURL: result.videoURL, signature: result.signature
+                    videoURL: result.videoURL,
+                    signature: result.signature,
+                    tracePreview: trace,
+                    soundtrackId: nil   // soundtrack picker UI is a separate task
                 )
             } catch {
                 isRecording = false
