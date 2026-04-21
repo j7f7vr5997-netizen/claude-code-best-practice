@@ -101,6 +101,17 @@ Nothing in the existing repo is reused — it's docs-only. The plan file itself 
 
 **Phase 3:** Android port, E2E encryption (libsignal), anti-replay nonces, screenshot detection, abuse reporting.
 
+## Genre-Inspired UX Conventions
+
+These additions take Snapchat / TikTok / BeReal as reference points so the app feels native to the ephemeral-messaging genre rather than reinventing every interaction:
+
+- **Snapchat-style 24-hour expiration on group rounds.** Inbox rows show a live countdown ("⏱ 14h") for urgency. After expiration, the system either compiles partial (if a majority responded) or marks the round abandoned.
+- **BeReal-style "late" badge** on responses that came in within the last 10% of the round window — turns the lateness signal into a visible feature instead of hiding it.
+- **Snapchat-style replay cap.** Receivers get up to **5 motion-match attempts** per message; after the 5th failure, the message is permanently locked and the sender gets a "ran out of attempts" push.
+- **"Matched!" push to sender** on successful unlock — mirrors Snapchat's "X took a screenshot" / "X opened your snap" feedback.
+- **TikTok-style soundtracks** as first-class entities with `play_count`, `is_trending`, and on-screen attribution during compilation playback. Sender picks from a curated catalog at compose time; uploaded soundtracks are post-MVP (copyright surface).
+- **Animated motion-trace thumbnail in the inbox.** A 2D scribble derived from cumulative gyro integration draws itself over the message's duration when the row is visible, telegraphing both the gesture's shape and its tempo without revealing the video.
+
 ## Verification
 
 A build is working when:
